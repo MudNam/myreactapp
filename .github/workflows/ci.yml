@@ -43,8 +43,8 @@ jobs:
             npm run build
 
             # Kill any process running on port 3000
-            fuser -k 5000/tcp || true
+            fuser -k 3000/tcp || true
 
             # Serve the app
-            nohup npx serve -s build -l 5000 > output.log 2>&1 &
+            nohup npx serve -s build -l 3000 > output.log 2>&1 &
           EOF
