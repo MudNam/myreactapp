@@ -24,14 +24,14 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           chmod 700 ~/.ssh
           
-          # Verify key format
+          # Verify key format (supporting both RSA and OpenSSH formats)
           echo "Checking SSH key format..."
-          if ! grep -q "BEGIN RSA PRIVATE KEY" ~/.ssh/id_rsa; then
-            echo "Error: SSH key does not start with BEGIN RSA PRIVATE KEY"
+          if ! grep -q "BEGIN" ~/.ssh/id_rsa; then
+            echo "Error: SSH key does not start with BEGIN"
             exit 1
           fi
-          if ! grep -q "END RSA PRIVATE KEY" ~/.ssh/id_rsa; then
-            echo "Error: SSH key does not end with END RSA PRIVATE KEY"
+          if ! grep -q "END" ~/.ssh/id_rsa; then
+            echo "Error: SSH key does not end with END"
             exit 1
           fi
           
