@@ -5,6 +5,12 @@ on:
   push:
     branches:
       - main  # Runs on push to 'main' branch
+  workflow_dispatch:  # Adds manual trigger button
+    inputs:
+      reason:
+        description: 'Reason for manual deployment'
+        required: false
+        default: 'Manual trigger'
 
 jobs:
   deploy:
