@@ -1,5 +1,6 @@
 name: Deploy React App to GCP
 
+# Trigger on push to main branch
 on:
   push:
     branches:
@@ -29,6 +30,14 @@ jobs:
           ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
         
+      - name: Test SSH Connection
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
+        run: |
+          ssh -i ~/.ssh/id_rsa -p $SSH_PORT $SSH_USERNAME@$SSH_HOST "echo 'SSH connection successful'"
+        
       - name: Deploy to GCP VM
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
@@ -44,7 +53,7 @@ jobs:
             
             # Clone repo if not exists, else pull latest changes
             if [ ! -d ".git" ]; then
-              git clone git@github.com:Mudnam/myreactapp.git .
+              git clone git@github.com:MudNam/myreactapp.git .
             else
               git pull origin main
             fi
