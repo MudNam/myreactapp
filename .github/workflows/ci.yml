@@ -1,5 +1,4 @@
 name: Deploy React App to GCP
-
 on:
   push:
     branches:
@@ -8,43 +7,56 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
-
+      
       - name: Set Up SSH Key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-
+      
       - name: Add SSH Host to Known Hosts
-        run: ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
-
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts
+      
       - name: Deploy to GCP VM
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
         run: |
-          ssh -i ~/.ssh/id_rsa -p ${{ secrets.SSH_PORT }} ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }} << 'EOF'
+          ssh -i ~/.ssh/id_rsa -p $SSH_PORT $SSH_USERNAME@$SSH_HOST << 'EOF'
+            set -e  # Exit immediately if a command exits with a non-zero status
+            
             # Navigate to the project directory or create it if it doesn't exist
             mkdir -p ~/react-app
             cd ~/react-app
-
+            
             # Clone repo if not exists, else pull latest changes
             if [ ! -d ".git" ]; then
               git clone git@github.com:Mudnam/myreactapp.git .
             else
               git pull origin main
             fi
-
+            
             # Install dependencies
-            npm install
-
+            npm ci  # More reliable than npm install for CI environments
+            
             # Build the React app
             npm run build
-
-            # Kill any process running on port 3000
-            fuser -k 3000/tcp || true
-
-            # Serve the app
-            nohup npx serve -s build -l 3000 > output.log 2>&1 &
+            
+            # Use PM2 to manage the process
+            if pm2 list | grep -q "react-app"; then
+              pm2 stop react-app
+              pm2 delete react-app
+            fi
+            
+            # Serve the app on port 5000
+            pm2 start npx --name "react-app" -- serve -s build -l 5000
           EOF
