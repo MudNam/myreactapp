@@ -19,13 +19,29 @@ jobs:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.ssh
-          echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+          # Ensure proper line endings and remove any extra spaces
+          echo "$SSH_PRIVATE_KEY" | tr -d '\r' | sed 's/^[ \t]*//;s/[ \t]*$//' > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           chmod 700 ~/.ssh
-          # Debug: Check if key file exists and its permissions
+          
+          # Verify key format
+          echo "Checking SSH key format..."
+          if ! grep -q "BEGIN RSA PRIVATE KEY" ~/.ssh/id_rsa; then
+            echo "Error: SSH key does not start with BEGIN RSA PRIVATE KEY"
+            exit 1
+          fi
+          if ! grep -q "END RSA PRIVATE KEY" ~/.ssh/id_rsa; then
+            echo "Error: SSH key does not end with END RSA PRIVATE KEY"
+            exit 1
+          fi
+          
+          # Debug: Show key file info
+          echo "Key file info:"
           ls -la ~/.ssh/id_rsa
-          # Debug: Check first few characters of the key
+          echo "First line of key:"
           head -n 1 ~/.ssh/id_rsa
+          echo "Last line of key:"
+          tail -n 1 ~/.ssh/id_rsa
         
       - name: Add SSH Host to Known Hosts
         env:
@@ -33,7 +49,7 @@ jobs:
         run: |
           ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
-          # Debug: Show the known_hosts content
+          echo "Known hosts content:"
           cat ~/.ssh/known_hosts
         
       - name: Test SSH Connection
@@ -42,7 +58,6 @@ jobs:
           SSH_PORT: ${{ secrets.SSH_PORT }}
           SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
         run: |
-          # Debug: Show SSH command being used
           echo "Attempting to connect to $SSH_USERNAME@$SSH_HOST:$SSH_PORT"
           # Try SSH with verbose output
           ssh -v -i ~/.ssh/id_rsa -p $SSH_PORT $SSH_USERNAME@$SSH_HOST "echo 'SSH connection successful'"
