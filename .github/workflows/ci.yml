@@ -1,6 +1,6 @@
 name: Deploy React App to GCP
 
-# Trigger workflow with proper SSH key
+# Testing with new private key
 on:
   push:
     branches:
