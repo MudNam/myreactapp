@@ -1,4 +1,5 @@
 name: Deploy React App to GCP
+
 on:
   push:
     branches:
@@ -11,7 +12,7 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
-      
+        
       - name: Set Up SSH Key
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -19,12 +20,12 @@ jobs:
           mkdir -p ~/.ssh
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-      
+        
       - name: Add SSH Host to Known Hosts
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
         run: ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts
-      
+        
       - name: Deploy to GCP VM
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
