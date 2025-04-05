@@ -11,6 +11,14 @@ on:
         description: 'Reason for manual deployment'
         required: false
         default: 'Manual trigger'
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
 
 jobs:
   deploy:
@@ -68,47 +76,58 @@ jobs:
           # Try SSH with verbose output
           ssh -v -i ~/.ssh/id_rsa -p $SSH_PORT $SSH_USERNAME@$SSH_HOST "echo 'SSH connection successful'"
         
-      - name: Deploy to GCP VM
+      - name: Deploy to GCP VMs
         env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_PORT: ${{ secrets.SSH_PORT }}
           SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
+          VM_DEPLOY_KEY: ${{ secrets.VM_DEPLOY_KEY }}
+          INSTANCE_IPS: ${{ secrets.INSTANCE_IPS }}
         run: |
-          ssh -i ~/.ssh/id_rsa -p $SSH_PORT $SSH_USERNAME@$SSH_HOST << 'EOF'
-            set -e  # Exit immediately if a command exits with a non-zero status
+          # Function to deploy to a single VM
+          deploy_to_vm() {
+            local vm_host=$1
+            local vm_port=$2
             
-            # Debug: Show current user and directory
-            echo "Current user: $(whoami)"
-            echo "Current directory: $(pwd)"
+            echo "Deploying to VM: $vm_host:$vm_port"
             
-            # Add GitHub to known hosts
-            mkdir -p ~/.ssh
-            ssh-keyscan -H github.com >> ~/.ssh/known_hosts
-            chmod 600 ~/.ssh/known_hosts
-            
-            # Navigate to the project directory or create it if it doesn't exist
-            mkdir -p ~/react-app
-            cd ~/react-app
-            
-            # Clone repo if not exists, else pull latest changes
-            if [ ! -d ".git" ]; then
-              git clone git@github.com:MudNam/myreactapp.git .
-            else
-              git pull origin main
-            fi
-            
-            # Install dependencies
-            npm ci  # More reliable than npm install for CI environments
-            
-            # Build the React app
-            npm run build
-            
-            # Use PM2 to manage the process
-            if pm2 list | grep -q "react-app"; then
-              pm2 stop react-app
-              pm2 delete react-app
-            fi
-            
-            # Serve the app on port 5000
-            pm2 start npx --name "react-app" -- serve -s build -l 5000
-          EOF
+            ssh -i ~/.ssh/id_rsa -p $vm_port $SSH_USERNAME@$vm_host << 'EOF'
+              set -e
+              
+              # Set up GitHub deploy key
+              mkdir -p ~/.ssh
+              echo "$VM_DEPLOY_KEY" | tr -d '\r' > ~/.ssh/id_ed25519
+              chmod 600 ~/.ssh/id_ed25519
+              ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+              chmod 600 ~/.ssh/known_hosts
+              
+              # Navigate to project directory
+              mkdir -p ~/react-app
+              cd ~/react-app
+              
+              # Clone or pull latest changes
+              if [ ! -d ".git" ]; then
+                GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519" git clone git@github.com:MudNam/myreactapp.git .
+              else
+                GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519" git pull origin main
+              fi
+              
+              # Install dependencies and build
+              npm ci
+              npm run build
+              
+              # Manage process with PM2
+              if pm2 list | grep -q "react-app"; then
+                pm2 stop react-app
+                pm2 delete react-app
+              fi
+              
+              # Start the app
+              pm2 start npx --name "react-app" -- serve -s build -l 5000
+            EOF
+          }
+          
+          # Split instance IPs and deploy to each
+          IFS=',' read -ra INSTANCES <<< "$INSTANCE_IPS"
+          for ip in "${INSTANCES[@]}"; do
+            deploy_to_vm "$ip" "$SSH_PORT"
+          done
