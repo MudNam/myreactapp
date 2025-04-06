@@ -1,114 +1,174 @@
-name: Deploy React App to GCP
+name: Deploy React App to GCP Load Balancer
 
-# Testing with new privatee key
 on:
   push:
     branches:
-      - main  # Runs on push to 'main' branch
-  workflow_dispatch:  # Adds manual triggerr button
+      - main
+  workflow_dispatch:
     inputs:
       reason:
-        description: 'Reason for manual deployment'
-        required: false
-        default: 'Manual trigger'
+        description: 'Reason for deployment'
+        required: true
+        default: 'Manual deployment'
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+  GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+  LOAD_BALANCER_IP: ${{ secrets.LOAD_BALANCER_IP }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'production' }}
     
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
-        
-      - name: Set Up SSH Key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          # Ensure proper line endings and remove any extra spaces
-          echo "$SSH_PRIVATE_KEY" | tr -d '\r' | sed 's/^[ \t]*//;s/[ \t]*$//' > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          chmod 700 ~/.ssh
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Google Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        project_id: ${{ env.GCP_PROJECT }}
+        service_account_key: ${{ env.GCP_SA_KEY }}
+        export_default_credentials: true
+
+    - name: Get Instance List
+      id: get_instances
+      run: |
+        # Get all instances behind load balancer
+        INSTANCE_LIST=$(gcloud compute instances list --filter="labels.app=react-app" --format="get(name,zone)")
+        echo "Found instances: $INSTANCE_LIST"
+        echo "instance_list=$INSTANCE_LIST" >> $GITHUB_ENV
+
+    - name: Deploy to Instances
+      run: |
+        # Function to deploy to a single instance
+        deploy_to_instance() {
+          local instance_name=$1
+          local zone=$2
           
-          # Verify key format (supporting both RSA and OpenSSH formats)
-          echo "Checking SSH key format..."
-          if ! grep -q "BEGIN" ~/.ssh/id_rsa; then
-            echo "Error: SSH key does not start with BEGIN"
-            exit 1
-          fi
-          if ! grep -q "END" ~/.ssh/id_rsa; then
-            echo "Error: SSH key does not end with END"
-            exit 1
-          fi
+          echo "Deploying to instance: $instance_name in zone: $zone"
           
-          # Debug: Show key file info
-          echo "Key file info:"
-          ls -la ~/.ssh/id_rsa
-          echo "First line of key:"
-          head -n 1 ~/.ssh/id_rsa
-          echo "Last line of key:"
-          tail -n 1 ~/.ssh/id_rsa
-        
-      - name: Add SSH Host to Known Hosts
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-        run: |
-          ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-          echo "Known hosts content:"
-          cat ~/.ssh/known_hosts
-        
-      - name: Test SSH Connection
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
-          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
-        run: |
-          echo "Attempting to connect to $SSH_USERNAME@$SSH_HOST:$SSH_PORT"
-          # Try SSH with verbose output
-          ssh -v -i ~/.ssh/id_rsa -p $SSH_PORT $SSH_USERNAME@$SSH_HOST "echo 'SSH connection successful'"
-        
-      - name: Deploy to GCP VM
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
-          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
-        run: |
-          ssh -i ~/.ssh/id_rsa -p $SSH_PORT $SSH_USERNAME@$SSH_HOST << 'EOF'
-            set -e  # Exit immediately if a command exits with a non-zero status
+          # Deploy using service account
+          gcloud compute ssh $instance_name --zone=$zone --command='
+            set -e
             
-            # Debug: Show current user and directory
-            echo "Current user: $(whoami)"
-            echo "Current directory: $(pwd)"
+            # Navigate to project directory
+            mkdir -p /var/www/react-app
+            cd /var/www/react-app
             
-            # Add GitHub to known hosts
-            mkdir -p ~/.ssh
-            ssh-keyscan -H github.com >> ~/.ssh/known_hosts
-            chmod 600 ~/.ssh/known_hosts
-            
-            # Navigate to the project directory or create it if it doesn't exist
-            mkdir -p ~/react-app
-            cd ~/react-app
-            
-            # Clone repo if not exists, else pull latest changes
+            # Clone or pull latest changes
             if [ ! -d ".git" ]; then
-              git clone git@github.com:MudNam/myreactapp.git .
+                git clone https://github.com/${{ github.repository }} .
             else
-              git pull origin main
+                git pull origin main
             fi
             
-            # Install dependencies
-            npm ci  # More reliable than npm install for CI environments
-            
-            # Build the React app
+            # Install dependencies and build
+            npm install
             npm run build
             
-            # Use PM2 to manage the process
-            if pm2 list | grep -q "react-app"; then
-              pm2 stop react-app
-              pm2 delete react-app
+            # Start new app on different port
+            pm2 start npx --name "react-app-new" -- serve -s build -l 5001
+            
+            # Add health check endpoint if not exists
+            if [ ! -f "health.js" ]; then
+              cat > health.js << "HEALTHEOF"
+              const express = require("express");
+              const app = express();
+              app.get("/health", (req, res) => res.status(200).send("OK"));
+              app.listen(8080);
+              HEALTHEOF
+              
+              npm install express
+              pm2 start health.js --name "health-check"
             fi
             
-            # Serve the app on port 5000
-            pm2 start npx --name "react-app" -- serve -s build -l 5000
-          EOF
+            # Wait for new app to be ready
+            echo "Waiting for new app to be ready..."
+            for i in {1..30}; do
+              if curl -s http://localhost:5001 > /dev/null; then
+                echo "New app is ready!"
+                
+                # Stop old app
+                if pm2 list | grep -q "react-app"; then
+                  pm2 delete react-app
+                fi
+                
+                # Rename new app
+                pm2 delete react-app-new
+                pm2 start npx --name "react-app" -- serve -s build -l 5000
+                
+                exit 0
+              fi
+              sleep 2
+            done
+            
+            # If we get here, new app failed to start
+            pm2 delete react-app-new
+            echo "Failed to start new app"
+            exit 1
+          '
+          
+          # Verify instance health
+          echo "Verifying instance health..."
+          for i in {1..5}; do
+            if curl -s "http://$instance_name:8080/health"; then
+              echo "Instance $instance_name is healthy"
+              return 0
+            fi
+            sleep 5
+          done
+          
+          echo "Instance $instance_name failed health check"
+          return 1
+        }
+        
+        # Deploy to each instance
+        echo "$instance_list" | while read -r instance zone; do
+          if [ ! -z "$instance" ]; then
+            echo "Starting deployment to $instance"
+            
+            # Deploy and verify
+            if deploy_to_instance "$instance" "$zone"; then
+              echo "Successfully deployed to $instance"
+            else
+              echo "Failed to deploy to $instance"
+              exit 1
+            fi
+            
+            # Wait before next instance
+            echo "Waiting 30 seconds before next instance..."
+            sleep 30
+          fi
+        done
+
+    - name: Verify Load Balancer Health
+      run: |
+        echo "Verifying load balancer health..."
+        for i in {1..5}; do
+          if curl -s "http://${{ env.LOAD_BALANCER_IP }}/health"; then
+            echo "Load balancer is healthy"
+            exit 0
+          fi
+          echo "Attempt $i: Load balancer not ready, waiting..."
+          sleep 10
+        done
+        echo "Load balancer health check failed"
+        exit 1
+
+    - name: Log Deployment Info
+      run: |
+        echo "Deployment Information:"
+        echo "Reason: ${{ github.event.inputs.reason }}"
+        echo "Environment: ${{ github.event.inputs.environment }}"
+        echo "Deployed by: ${{ github.actor }}"
+        echo "Timestamp: $(date)"
