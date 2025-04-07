@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main  # Runs on push to 'main' branch
-  workflow_dispatch:  # Adds manual triggerr button
+  workflow_dispatch:  # Adds manual trigger button
     inputs:
       reason:
         description: 'Reason for manual deployment'
@@ -68,6 +68,26 @@ jobs:
           # Try SSH with verbose output
           ssh -v -i ~/.ssh/id_rsa -p $SSH_PORT $SSH_USERNAME@$SSH_HOST "echo 'SSH connection successful'"
         
+      - name: Stop Existing PM2 Processes
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
+        run: |
+          ssh -i ~/.ssh/id_rsa -p $SSH_PORT $SSH_USERNAME@$SSH_HOST << 'EOF'
+            set -e
+            
+            echo "Checking for existing PM2 processes..."
+            if pm2 list | grep -q "react-app"; then
+              echo "Stopping existing react-app process..."
+              pm2 stop react-app || true
+              pm2 delete react-app || true
+              echo "Process stopped and deleted"
+            else
+              echo "No existing react-app process found"
+            fi
+          EOF
+        
       - name: Deploy to GCP VM
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
@@ -103,12 +123,17 @@ jobs:
             # Build the React app
             npm run build
             
-            # Use PM2 to manage the process
-            if pm2 list | grep -q "react-app"; then
-              pm2 stop react-app
-              pm2 delete react-app
+            # Start the app with PM2
+            echo "Starting the app with PM2..."
+            pm2 start npx --name "react-app" -- serve -s build -l 5000
+            
+            # Verify the app is running
+            echo "Verifying app is running..."
+            sleep 5
+            if ! pm2 list | grep -q "react-app"; then
+              echo "Error: App failed to start"
+              exit 1
             fi
             
-            # Serve the app on port 5000
-            pm2 start npx --name "react-app" -- serve -s build -l 5000
+            echo "Deployment completed successfully"
           EOF
