@@ -1,4 +1,4 @@
-name: Deploy React App to GCP
+name: Blue-Green Deployment to GCP
 
 # Testing with new private key
 on:
@@ -20,120 +20,97 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v3
         
-      - name: Set Up SSH Key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Set Up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+      - name: Scale Up to 4 Instances (Blue Environment)
         run: |
-          mkdir -p ~/.ssh
-          # Ensure proper line endings and remove any extra spaces
-          echo "$SSH_PRIVATE_KEY" | tr -d '\r' | sed 's/^[ \t]*//;s/[ \t]*$//' > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          chmod 700 ~/.ssh
+          echo "Scaling up to 4 instances for blue environment..."
+          gcloud compute instance-groups managed resize ${{ secrets.INSTANCE_GROUP }} --size=4 --zone=${{ secrets.GCP_ZONE }}
+          echo "Waiting for instances to be ready..."
+          sleep 60  # Wait for instances to be ready
+
+      - name: Deploy to New Instances (Blue)
+        run: |
+          # Get list of all instances
+          INSTANCES=$(gcloud compute instances list --filter="labels.app=react-app" --format="value(name)")
+          echo "Found instances: $INSTANCES"
           
-          # Verify key format (supporting both RSA and OpenSSH formats)
-          echo "Checking SSH key format..."
-          if ! grep -q "BEGIN" ~/.ssh/id_rsa; then
-            echo "Error: SSH key does not start with BEGIN"
-            exit 1
-          fi
-          if ! grep -q "END" ~/.ssh/id_rsa; then
-            echo "Error: SSH key does not end with END"
-            exit 1
-          fi
+          # Deploy to each new instance
+          for INSTANCE in $INSTANCES; do
+            echo "Deploying to instance: $INSTANCE"
+            
+            # Get the instance IP
+            INSTANCE_IP=$(gcloud compute instances describe $INSTANCE --zone=${{ secrets.GCP_ZONE }} --format="value(networkInterfaces[0].accessConfigs[0].natIP)")
+            
+            # SSH into instance and deploy
+            gcloud compute ssh $INSTANCE --zone=${{ secrets.GCP_ZONE }} --command="
+              set -e
+              
+              # Navigate to the project directory
+              mkdir -p ~/react-app
+              cd ~/react-app
+              
+              # Clone or pull latest code
+              if [ ! -d '.git' ]; then
+                git clone git@github.com:MudNam/myreactapp.git .
+              else
+                git pull origin main
+              fi
+              
+              # Install dependencies and build
+              npm ci
+              npm run build
+              
+              # Start the application with PM2
+              pm2 start npx --name 'react-app' -- serve -s build -l 5000
+              
+              # Verify the application is running
+              sleep 5
+              if ! pm2 list | grep -q 'react-app'; then
+                echo 'Error: Application failed to start'
+                exit 1
+              fi
+            "
+          done
+
+      - name: Verify Blue Environment
+        run: |
+          # Get list of all instances
+          INSTANCES=$(gcloud compute instances list --filter="labels.app=react-app" --format="value(name)")
           
-          # Debug: Show key file info
-          echo "Key file info:"
-          ls -la ~/.ssh/id_rsa
-          echo "First line of key:"
-          head -n 1 ~/.ssh/id_rsa
-          echo "Last line of key:"
-          tail -n 1 ~/.ssh/id_rsa
-        
-      - name: Add SSH Host to Known Hosts
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-        run: |
-          ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-          echo "Known hosts content:"
-          cat ~/.ssh/known_hosts
-        
-      - name: Test SSH Connection
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
-          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
-        run: |
-          echo "Attempting to connect to $SSH_USERNAME@$SSH_HOST:$SSH_PORT"
-          # Try SSH with verbose output
-          ssh -v -i ~/.ssh/id_rsa -p $SSH_PORT $SSH_USERNAME@$SSH_HOST "echo 'SSH connection successful'"
-        
-      - name: Stop Existing PM2 Processes
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
-          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
-        run: |
-          ssh -i ~/.ssh/id_rsa -p $SSH_PORT $SSH_USERNAME@$SSH_HOST << 'EOF'
-            set -e
+          for INSTANCE in $INSTANCES; do
+            INSTANCE_IP=$(gcloud compute instances describe $INSTANCE --zone=${{ secrets.GCP_ZONE }} --format="value(networkInterfaces[0].accessConfigs[0].natIP)")
             
-            echo "Checking for existing PM2 processes..."
-            if pm2 list | grep -q "react-app"; then
-              echo "Stopping existing react-app process..."
-              pm2 stop react-app || true
-              pm2 delete react-app || true
-              echo "Process stopped and deleted"
-            else
-              echo "No existing react-app process found"
-            fi
-          EOF
-        
-      - name: Deploy to GCP VM
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
-          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
-        run: |
-          ssh -i ~/.ssh/id_rsa -p $SSH_PORT $SSH_USERNAME@$SSH_HOST << 'EOF'
-            set -e  # Exit immediately if a command exits with a non-zero status
-            
-            # Debug: Show current user and directory
-            echo "Current user: $(whoami)"
-            echo "Current directory: $(pwd)"
-            
-            # Add GitHub to known hosts
-            mkdir -p ~/.ssh
-            ssh-keyscan -H github.com >> ~/.ssh/known_hosts
-            chmod 600 ~/.ssh/known_hosts
-            
-            # Navigate to the project directory or create it if it doesn't exist
-            mkdir -p ~/react-app
-            cd ~/react-app
-            
-            # Clone repo if not exists, else pull latest changes
-            if [ ! -d ".git" ]; then
-              git clone git@github.com:MudNam/myreactapp.git .
-            else
-              git pull origin main
-            fi
-            
-            # Install dependencies
-            npm ci  # More reliable than npm install for CI environments
-            
-            # Build the React app
-            npm run build
-            
-            # Start the app with PM2
-            echo "Starting the app with PM2..."
-            pm2 start npx --name "react-app" -- serve -s build -l 5000
-            
-            # Verify the app is running
-            echo "Verifying app is running..."
-            sleep 5
-            if ! pm2 list | grep -q "react-app"; then
-              echo "Error: App failed to start"
+            # Check if application is responding
+            if ! curl -s "http://$INSTANCE_IP:5000" > /dev/null; then
+              echo "Error: Instance $INSTANCE is not responding"
               exit 1
             fi
-            
-            echo "Deployment completed successfully"
-          EOF
+          done
+
+      - name: Update Load Balancer
+        run: |
+          # Update the load balancer to point to the new instances
+          echo "Updating load balancer to point to new instances..."
+          # Add your load balancer update commands here
+
+      - name: Scale Down to 2 Instances (Remove Green Environment)
+        run: |
+          echo "Scaling down to 2 instances..."
+          gcloud compute instance-groups managed resize ${{ secrets.INSTANCE_GROUP }} --size=2 --zone=${{ secrets.GCP_ZONE }}
+          
+          # Wait for scaling to complete
+          echo "Waiting for scaling to complete..."
+          sleep 60
+          
+          # Verify only 2 instances are running
+          INSTANCE_COUNT=$(gcloud compute instances list --filter="labels.app=react-app" --format="value(name)" | wc -l)
+          if [ "$INSTANCE_COUNT" -ne 2 ]; then
+            echo "Error: Expected 2 instances, found $INSTANCE_COUNT"
+            exit 1
+          fi
