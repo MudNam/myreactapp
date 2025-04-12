@@ -102,7 +102,7 @@ jobs:
             --zone=${{ secrets.GCP_ZONE }} \
             --max-unavailable=1 \
             --max-surge=1 \
-            --min-ready=60
+            --min-ready-percentage=100
 
       - name: Wait for Update Completion
         run: |
