@@ -102,8 +102,7 @@ jobs:
             --zone=${{ secrets.GCP_ZONE }} \
             --version=template=${{ steps.template.outputs.template_name }} \
             --max-unavailable=1 \
-            --max-surge=1 \
-            --min-ready=60
+            --max-surge=1
 
       - name: Wait for Update Completion
         run: |
