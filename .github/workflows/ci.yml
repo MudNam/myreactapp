@@ -112,18 +112,42 @@ jobs:
           ELAPSED=0
           
           while [ $ELAPSED -lt $TIMEOUT ]; do
-            # Get all instance statuses
-            INSTANCE_STATUSES=$(gcloud compute instance-groups managed list-instances ${{ secrets.GCP_INSTANCE_GROUP }} \
+            # Get detailed instance information
+            echo "Checking instance status..."
+            INSTANCE_INFO=$(gcloud compute instance-groups managed list-instances ${{ secrets.GCP_INSTANCE_GROUP }} \
               --zone=${{ secrets.GCP_ZONE }} \
-              --format="value(status)")
+              --format="table(name,status,version.template,currentAction)")
             
-            # Check if all instances are RUNNING
-            if echo "$INSTANCE_STATUSES" | grep -v "RUNNING" > /dev/null; then
-              echo "⏳ Some instances are still updating... ($ELAPSED/$TIMEOUT seconds)"
-              echo "Current statuses:"
-              echo "$INSTANCE_STATUSES"
+            # Check for errors in the output
+            if echo "$INSTANCE_INFO" | grep -q "ERROR"; then
+              echo "❌ Error in instance status check:"
+              echo "$INSTANCE_INFO"
+              exit 1
+            fi
+            
+            # Count non-RUNNING instances
+            NON_RUNNING_COUNT=$(echo "$INSTANCE_INFO" | grep -v "RUNNING" | grep -v "NAME" | wc -l)
+            
+            if [ "$NON_RUNNING_COUNT" -gt 0 ]; then
+              echo "⏳ $NON_RUNNING_COUNT instances still updating... ($ELAPSED/$TIMEOUT seconds)"
+              echo "Current status:"
+              echo "$INSTANCE_INFO"
+              
+              # Check for specific issues
+              if echo "$INSTANCE_INFO" | grep -q "VERIFYING"; then
+                echo "⚠️ Some instances are in VERIFYING state"
+              fi
+              if echo "$INSTANCE_INFO" | grep -q "STAGING"; then
+                echo "⚠️ Some instances are in STAGING state"
+              fi
+              if echo "$INSTANCE_INFO" | grep -q "ERROR"; then
+                echo "❌ Some instances have errors"
+                exit 1
+              fi
             else
               echo "✅ All instances are running and updated"
+              echo "Final status:"
+              echo "$INSTANCE_INFO"
               exit 0
             fi
             
@@ -132,10 +156,17 @@ jobs:
           done
           
           echo "❌ Timeout waiting for update to complete"
-          echo "Final statuses:"
+          echo "Final status:"
           gcloud compute instance-groups managed list-instances ${{ secrets.GCP_INSTANCE_GROUP }} \
             --zone=${{ secrets.GCP_ZONE }} \
-            --format="table(name,status,version.template)"
+            --format="table(name,status,version.template,currentAction)"
+          
+          # Get instance group status
+          echo "Instance group status:"
+          gcloud compute instance-groups managed describe ${{ secrets.GCP_INSTANCE_GROUP }} \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --format="table(status)"
+          
           exit 1
 
       - name: Cleanup Old Templates
