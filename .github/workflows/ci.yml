@@ -1,168 +1,139 @@
-name: Deployment with Autoscaling Support
+name: React.js GCP Deployment
 
-# Testing with new private key
 on:
-  push:
-    branches:
-      - main  # Runs on push to 'main' branch
-  workflow_dispatch:  # Adds manual trigger button
+  workflow_dispatch:
     inputs:
-      reason:
-        description: 'Reason for manual deployment'
-        required: false
-        default: 'Manual trigger'
+      branch:
+        description: 'Branch to deploy'
+        required: true
+        default: 'main'
+        type: string
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
-        
-      - name: Set Up Google Cloud SDK
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: 'Authenticate to Google Cloud'
+        uses: 'google-github-actions/auth@v1'
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
         with:
-          project_id: ${{ secrets.GCP_PROJECT }}
-          service_account_key: ${{ secrets.GCP_SA_KEY }}
-          export_default_credentials: true
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
-      - name: Get Current Instance Count
-        id: get_count
+      - name: Create Instance Template
+        id: template
         run: |
-          CURRENT_COUNT=$(gcloud compute instances list --filter="labels.app=react-app" --format="value(name)" | wc -l)
-          if [ "$CURRENT_COUNT" -eq 0 ]; then
-            echo "Error: No instances found with label app=react-app"
-            exit 1
+          # Generate template name
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          TEMPLATE_NAME="react-app-template-${TIMESTAMP}"
+          
+          # Create startup script using heredoc
+          cat > startup-script.sh << 'STARTUP_SCRIPT'
+          #!/bin/bash
+          
+          # System setup
+          apt-get update
+          apt-get install -y git nodejs npm
+          
+          # GitHub setup
+          mkdir -p /root/.ssh
+          echo "$SSH_PRIVATE_KEY" > /root/.ssh/id_ed25519
+          chmod 600 /root/.ssh/id_ed25519
+          ssh-keyscan github.com >> /root/.ssh/known_hosts
+          
+          # Application setup
+          mkdir -p /app
+          cd /app
+          git clone $REPO_URL .
+          git checkout $BRANCH
+          
+          # Install dependencies and build
+          npm install
+          npm run build
+          
+          # Install PM2 globally
+          npm install -g pm2
+          
+          # Start application
+          pm2 start npm --name "react-app" -- start
+          pm2 save
+          STARTUP_SCRIPT
+          
+          # Make script executable
+          chmod +x startup-script.sh
+          
+          # Create instance template
+          gcloud compute instance-templates create $TEMPLATE_NAME \
+            --machine-type=e2-medium \
+            --image-family=ubuntu-2004-lts \
+            --image-project=ubuntu-os-cloud \
+            --tags=http-server,https-server \
+            --metadata-from-file=startup-script=startup-script.sh \
+            --metadata=^||^REPO_URL=${{ github.repositoryUrl }}||BRANCH=${{ github.event.inputs.branch }}||SSH_PRIVATE_KEY=${{ secrets.SSH_PRIVATE_KEY }}
+          
+          echo "template_name=$TEMPLATE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Update Instance Group
+        run: |
+          # Update instance group with new template
+          gcloud compute instance-groups managed set-instance-template ${{ secrets.GCP_INSTANCE_GROUP }} \
+            --template=${{ steps.template.outputs.template_name }} \
+            --zone=${{ secrets.GCP_ZONE }}
+
+      - name: Start Rolling Update
+        run: |
+          # Start rolling update
+          gcloud compute instance-groups managed rolling-action start-update ${{ secrets.GCP_INSTANCE_GROUP }} \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --max-unavailable=1 \
+            --max-surge=1 \
+            --min-ready=60
+
+      - name: Wait for Update Completion
+        run: |
+          # Wait for update to complete
+          TIMEOUT=600
+          INTERVAL=30
+          ELAPSED=0
+          
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            STATUS=$(gcloud compute instance-groups managed list-instances ${{ secrets.GCP_INSTANCE_GROUP }} \
+              --zone=${{ secrets.GCP_ZONE }} \
+              --format="value(status)" | grep -v "RUNNING" || echo "RUNNING")
+            
+            if [ "$STATUS" = "RUNNING" ]; then
+              echo "✅ All instances are running and updated"
+              exit 0
+            fi
+            
+            echo "⏳ Waiting for instances to update... ($ELAPSED/$TIMEOUT seconds)"
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          
+          echo "❌ Timeout waiting for update to complete"
+          exit 1
+
+      - name: Cleanup Old Templates
+        run: |
+          # Keep only the 5 most recent templates
+          TEMPLATES_TO_DELETE=$(gcloud compute instance-templates list \
+            --filter="name~'react-app-template-*'" \
+            --sort-by="~creationTimestamp" \
+            --format="value(name)" | tail -n +6)
+          
+          if [ -n "$TEMPLATES_TO_DELETE" ]; then
+            echo "🗑️ Deleting old templates:"
+            echo "$TEMPLATES_TO_DELETE"
+            echo "$TEMPLATES_TO_DELETE" | xargs -I {} gcloud compute instance-templates delete {} --quiet
+          else
+            echo "✨ No old templates to delete"
           fi
-          echo "Current instance count: $CURRENT_COUNT"
-          echo "current_count=$CURRENT_COUNT" >> $GITHUB_OUTPUT
-
-      - name: Temporarily Disable Autoscaling
-        run: |
-          echo "Temporarily disabling autoscaling for deployment..."
-          gcloud compute instance-groups managed update ${{ secrets.INSTANCE_GROUP }} \
-            --zone=${{ secrets.GCP_ZONE }} \
-            --min-num-replicas=${{ steps.get_count.outputs.current_count }} \
-            --max-num-replicas=${{ steps.get_count.outputs.current_count }}
-
-      - name: Scale Up (Blue Environment)
-        run: |
-          # Calculate new size (double the current count)
-          NEW_SIZE=$(( ${{ steps.get_count.outputs.current_count }} * 2 ))
-          echo "Scaling up to $NEW_SIZE instances for blue environment..."
-          
-          gcloud compute instance-groups managed resize ${{ secrets.INSTANCE_GROUP }} \
-            --size=$NEW_SIZE \
-            --zone=${{ secrets.GCP_ZONE }}
-          
-          # Wait for instances to be ready with retries
-          for i in {1..5}; do
-            sleep 30
-            READY_COUNT=$(gcloud compute instances list --filter="labels.app=react-app AND status=RUNNING" --format="value(name)" | wc -l)
-            if [ "$READY_COUNT" -eq "$NEW_SIZE" ]; then
-              echo "All instances are ready"
-              break
-            fi
-            if [ "$i" -eq 5 ]; then
-              echo "Error: Timeout waiting for instances to be ready"
-              exit 1
-            fi
-            echo "Waiting for instances to be ready (attempt $i/5)..."
-          done
-
-      - name: Deploy to Blue Environment
-        run: |
-          # Get all instances
-          INSTANCES=$(gcloud compute instances list --filter="labels.app=react-app" --format="value(name)")
-          
-          for INSTANCE in $INSTANCES; do
-            echo "Deploying to $INSTANCE"
-            # Try deployment up to 3 times
-            for attempt in {1..3}; do
-              if gcloud compute ssh $INSTANCE --zone=${{ secrets.GCP_ZONE }} --command="
-                set -e
-                cd ~/react-app || mkdir -p ~/react-app && cd ~/react-app
-                git pull origin main
-                npm ci
-                npm run build
-                pm2 start npx --name 'react-app' -- serve -s build -l 5000
-                sleep 5
-                pm2 list | grep -q 'react-app' || exit 1
-              "; then
-                echo "Deployment successful on attempt $attempt"
-                break
-              fi
-              if [ "$attempt" -eq 3 ]; then
-                echo "Error: Failed to deploy after 3 attempts"
-                exit 1
-              fi
-              echo "Retrying deployment (attempt $attempt/3)..."
-              sleep 10
-            done
-          done
-
-      - name: Verify Blue Environment
-        run: |
-          INSTANCES=$(gcloud compute instances list --filter="labels.app=react-app" --format="value(name)")
-          for INSTANCE in $INSTANCES; do
-            IP=$(gcloud compute instances describe $INSTANCE --zone=${{ secrets.GCP_ZONE }} --format="value(networkInterfaces[0].accessConfigs[0].natIP)")
-            # Try health check up to 3 times
-            for attempt in {1..3}; do
-              if curl -s "http://$IP:5000" > /dev/null; then
-                echo "Health check passed for $INSTANCE"
-                break
-              fi
-              if [ "$attempt" -eq 3 ]; then
-                echo "Error: Health check failed for $INSTANCE after 3 attempts"
-                exit 1
-              fi
-              echo "Retrying health check for $INSTANCE (attempt $attempt/3)..."
-              sleep 10
-            done
-          done
-
-      - name: Update Load Balancer
-        run: |
-          echo "Updating load balancer to point to new instances..."
-          # Get all instance IPs
-          INSTANCE_IPS=$(gcloud compute instances list --filter="labels.app=react-app" --format="value(networkInterfaces[0].accessConfigs[0].natIP)")
-          
-          # Update load balancer backend service
-          gcloud compute backend-services update ${{ secrets.LOAD_BALANCER_BACKEND }} \
-            --region=${{ secrets.GCP_REGION }} \
-            --add-backend="instance-group=${{ secrets.INSTANCE_GROUP }},zone=${{ secrets.GCP_ZONE }}"
-
-      - name: Scale Down (Remove Green Environment)
-        run: |
-          # Scale back to original count
-          ORIGINAL_COUNT=${{ steps.get_count.outputs.current_count }}
-          echo "Scaling down to $ORIGINAL_COUNT instances..."
-          
-          gcloud compute instance-groups managed resize ${{ secrets.INSTANCE_GROUP }} \
-            --size=$ORIGINAL_COUNT \
-            --zone=${{ secrets.GCP_ZONE }}
-          
-          # Verify scaling with retries
-          for i in {1..5}; do
-            sleep 30
-            COUNT=$(gcloud compute instances list --filter="labels.app=react-app" --format="value(name)" | wc -l)
-            if [ "$COUNT" -eq "$ORIGINAL_COUNT" ]; then
-              echo "Successfully scaled down to $ORIGINAL_COUNT instances"
-              break
-            fi
-            if [ "$i" -eq 5 ]; then
-              echo "Error: Failed to scale down to $ORIGINAL_COUNT instances"
-              exit 1
-            fi
-            echo "Waiting for scaling to complete (attempt $i/5)..."
-          done
-
-      - name: Re-enable Autoscaling
-        run: |
-          echo "Re-enabling autoscaling..."
-          gcloud compute instance-groups managed update ${{ secrets.INSTANCE_GROUP }} \
-            --zone=${{ secrets.GCP_ZONE }} \
-            --min-num-replicas=${{ secrets.AUTOSCALING_MIN }} \
-            --max-num-replicas=${{ secrets.AUTOSCALING_MAX }} \
-            --target-cpu-utilization=${{ secrets.AUTOSCALING_TARGET_CPU }}
