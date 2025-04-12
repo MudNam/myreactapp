@@ -112,21 +112,30 @@ jobs:
           ELAPSED=0
           
           while [ $ELAPSED -lt $TIMEOUT ]; do
-            STATUS=$(gcloud compute instance-groups managed list-instances ${{ secrets.GCP_INSTANCE_GROUP }} \
+            # Get all instance statuses
+            INSTANCE_STATUSES=$(gcloud compute instance-groups managed list-instances ${{ secrets.GCP_INSTANCE_GROUP }} \
               --zone=${{ secrets.GCP_ZONE }} \
-              --format="value(status)" | grep -v "RUNNING" || echo "RUNNING")
+              --format="value(status)")
             
-            if [ "$STATUS" = "RUNNING" ]; then
+            # Check if all instances are RUNNING
+            if echo "$INSTANCE_STATUSES" | grep -v "RUNNING" > /dev/null; then
+              echo "⏳ Some instances are still updating... ($ELAPSED/$TIMEOUT seconds)"
+              echo "Current statuses:"
+              echo "$INSTANCE_STATUSES"
+            else
               echo "✅ All instances are running and updated"
               exit 0
             fi
             
-            echo "⏳ Waiting for instances to update... ($ELAPSED/$TIMEOUT seconds)"
             sleep $INTERVAL
             ELAPSED=$((ELAPSED + INTERVAL))
           done
           
           echo "❌ Timeout waiting for update to complete"
+          echo "Final statuses:"
+          gcloud compute instance-groups managed list-instances ${{ secrets.GCP_INSTANCE_GROUP }} \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --format="table(name,status,version.template)"
           exit 1
 
       - name: Cleanup Old Templates
