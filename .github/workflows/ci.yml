@@ -49,7 +49,7 @@ jobs:
           chmod 600 /root/.ssh/id_ed25519
           ssh-keyscan github.com >> /root/.ssh/known_hosts
           
-          # Applicationx setup
+          # Application setup
           mkdir -p /app
           cd /app
           git clone $REPO_URL .
@@ -100,9 +100,10 @@ jobs:
           # Start rolling update
           gcloud compute instance-groups managed rolling-action start-update ${{ secrets.GCP_INSTANCE_GROUP }} \
             --zone=${{ secrets.GCP_ZONE }} \
+            --version=template=${{ steps.template.outputs.template_name }} \
             --max-unavailable=1 \
             --max-surge=1 \
-            
+            --min-ready=60
 
       - name: Wait for Update Completion
         run: |
