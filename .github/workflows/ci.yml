@@ -70,6 +70,13 @@ jobs:
           # Make script executable
           chmod +x startup-script.sh
           
+          # Create metadata file
+          cat > metadata.txt << EOF
+          REPO_URL=${{ github.repositoryUrl }}
+          BRANCH=${{ github.event.inputs.branch }}
+          SSH_PRIVATE_KEY=${{ secrets.SSH_PRIVATE_KEY }}
+          EOF
+          
           # Create instance template
           gcloud compute instance-templates create $TEMPLATE_NAME \
             --machine-type=e2-medium \
@@ -77,7 +84,7 @@ jobs:
             --image-project=ubuntu-os-cloud \
             --tags=http-server,https-server \
             --metadata-from-file=startup-script=startup-script.sh \
-            --metadata=^||^REPO_URL=${{ github.repositoryUrl }}||BRANCH=${{ github.event.inputs.branch }}||SSH_PRIVATE_KEY=${{ secrets.SSH_PRIVATE_KEY }}
+            --metadata-from-file=metadata=metadata.txt
           
           echo "template_name=$TEMPLATE_NAME" >> $GITHUB_OUTPUT
 
